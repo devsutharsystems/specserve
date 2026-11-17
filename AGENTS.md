@@ -91,7 +91,7 @@ plans/              PIV plans
 
 ## Model / effort reminder
 
-Opus, high effort on Days 3, 4, 5, 9, 10 (silent-bug days). Sonnet, high on Days 11 and 15. Sonnet, medium otherwise. A stronger model does not replace the gates.
+Tooling: GitHub Copilot (Copilot Fusion), not Claude Code. Effort High on Days 3, 4, 5, 9, 10, 11, 15; Standard on all other days. A stronger setting does not replace the gates.
 
 ## Definition of done (whole project)
 
