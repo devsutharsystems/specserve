@@ -1,5 +1,6 @@
 # SpecServe — 20-Day Roadmap
 > Start date: 18th November 2026. Calendar dates below are outdated; follow the day numbers, not the dates.
+> Tooling note: this project is built with GitHub Copilot instead of Claude Code; the PIV loop and gates are unchanged.
 
 > A small language model trained from scratch, plus a speculative decoding engine that uses it to make TinyLlama-1.1B generate faster with **identical output** — measured honestly on a free Kaggle T4.
 
