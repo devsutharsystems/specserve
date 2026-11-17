@@ -248,4 +248,4 @@ Each plan states goal, files, tasks, Kaggle needs, and a validation strategy wri
 - Prompt-lookup decoding — https://github.com/apoorvumang/prompt-lookup-decoding
 - Hugging Face assisted generation — https://huggingface.co/blog/assisted-generation
 - Transformer Inference Arithmetic — https://kipp.ly/transformer-inference-arithmetic/
-- Karpathy — *Let's build GPT* — https://www.youtube.com/watch?v=kCc8FmEb1nY · *Let's reproduce GPT-2* — https://www.youtube.com/watch?v=l8pRSuU81PU · nanoGPT — https://github.com/karpathy/nanoGP
+- Karpathy — *Let's build GPT* — https://www.youtube.com/watch?v=kCc8FmEb1nY · *Let's reproduce GPT-2* — https://www.youtube.com/watch?v=l8pRSuU81PU · nanoGPT — https://github.com/karpathy/nanoGPT
