@@ -15,7 +15,7 @@
 |---|---|
 | **What** | Train a ~36M-param draft model from scratch on TinyLlama's tokenizer. Build a greedy speculative decoding engine: the draft guesses *k* tokens, TinyLlama verifies all of them in one forward pass, matching guesses are kept, the first mismatch is replaced by TinyLlama's token. |
 | **Why** | First from-scratch, systems-level, independent project. Teaches LLM training end to end, KV caches, and memory-bound decoding — core ML/ML-systems interview topics. Ends in one honest number. |
-| **How it works** | At batch size 1, decoding is memory-bandwidth bound: each step mostly reloads the model's weights. Verifying *k* tokens in one pass costs about the same as generating on, so every accepted guess is nearly free. |
+| **How it works** | At batch size 1, decoding is memory-bandwidth bound: each step mostly reloads the model's weights. Verifying *k* tokens in one pass costs about the same as generating one, so every accepted guess is nearly free. |
 | **How we build it** | PIV loop in Claude Code (prime → plan → review gate → execute → validate → commit → evolve), one plan per block of days below. |
 | **Where** | Local CPU (Claude Code) for all code and unit tests. Kaggle T4 for training and benchmarks. Public repo: `github.com/devsutharsystems/specserve`. |
 | **Resources** | Kaggle T4 (free, ~30 GPU-hrs/week), TinyLlama-1.1B-Chat weights, FineWeb-Edu sample, UltraChat 200k, W&B free tier, GitHub, Claude Code. **Cost: ₹0. No paid API.** |
