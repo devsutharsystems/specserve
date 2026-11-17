@@ -9,7 +9,7 @@
 
 ---
 
-## Project at a glanc
+## Project at a glance
 
 | | |
 |---|---|
