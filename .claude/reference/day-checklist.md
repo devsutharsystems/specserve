@@ -4,7 +4,7 @@ Status tracker. Update a row only when its deliverable exists as a file and the 
 
 | Day | Deliverable | Status |
 |---|---|---|
-| 1 | Scaffolded repo, docs/project_spec.md, docs/research_questions.md, first commit | not started |
+| 1 | Scaffolded repo, docs/project_spec.md, docs/research_questions.md, first commit | done |
 | 2 | bench/prompts.jsonl frozen; experiments/baseline/*.csv; experiments/env.txt | not started |
 | 3 | specserve/model/ + tests | not started |
 | 4 | kv_cache.py + correctness tests | not started |
