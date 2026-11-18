@@ -1,0 +1,3 @@
+# Key names are provisional until Day 3's config.py.
+target_model_id: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+
