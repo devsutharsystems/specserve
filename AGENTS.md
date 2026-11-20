@@ -25,7 +25,7 @@ You implement inside this repo: code, tests, configs, Kaggle scripts, git. Plans
 
 ## Workflow (PIV loop) — mandatory
 
-1. **Prime:** read CLAUDE.md, ROADMAP.md, `git log --oneline -20`, and `plans/`.
+1. **Prime:** read AGENTS.md, ROADMAP.md, `git log --oneline -20`, and `plans/`.
 2. **Plan:** write `plans/dayNN-MM.md` for the current block: goal and success criteria, files to create/change, task list, Kaggle needs, and a **validation strategy written before any code**.
 3. **Review gate:** stop after writing the plan. **No implementation without an approved plan file.** If no approved plan exists for the current block, do planning only.
 4. **Execute:** implement the approved plan. Run CPU tests locally. Anything needing a GPU becomes a Kaggle script/notebook for Dev to run — never assume you can run GPU jobs.
@@ -89,9 +89,9 @@ plans/              PIV plans
 - **Target cache cropping:** check whether the installed `transformers` version provides `DynamicCache.crop`; if not, slice the cached tensors directly.
 - **Expected initial loss** for a fresh draft ≈ ln(32000) ≈ 10.37. A very different value means an init or loss bug.
 
-## Model / effort reminder
+## Tooling / effort
 
-Tooling: GitHub Copilot (Copilot Fusion), not Claude Code. Effort High on Days 3, 4, 5, 9, 10, 11, 15; Standard on all other days. A stronger setting does not replace the gates.
+Tooling: OpenAI Codex in VS Code (not Claude Code or Copilot). Effort high on Days 3, 4, 5, 9, 10, 11, 15; medium on all other days. A stronger setting does not replace the gates. Keep approvals on; never use Full Access. Never read, print or commit secrets.
 
 ## Definition of done (whole project)
 
