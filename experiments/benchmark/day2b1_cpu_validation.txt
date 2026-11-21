@@ -1,0 +1,33 @@
+Day 2b-1 CPU correctness validation
+Platform: macOS-27.2.1-arm64-arm-64bit
+Python: 3.12.16
+torch: 2.11.0 (CUDA unavailable)
+transformers: 5.16.1
+tokenizers: 0.23.3
+pytest: 9.2.0
+PyYAML: 6.0.3
+Fixture seed: 20261118
+Benchmark configuration: configs/bench.yaml (max_matching_ngram_size=3, prompt_lookup_num_tokens=8)
+Tokenizer revision: fe8a4ea1ffedaf415f4da2f062534de366a451e6 (local tokenizer cache)
+
+Verified in installed Transformers source:
+LlamaModel.forward creates DynamicCache when caching is enabled without an input cache.
+It offsets position_ids by cache.get_seq_length() and returns the updated past_key_values.
+LlamaForCausalLM.forward accepts logits_to_keep.
+DynamicCache.crop(-n) removes the last n tokens in place.
+Positive crop arguments request an absolute retained length in 5.16.1 and are deprecated.
+
+Initial run:
+OMP_NUM_THREADS=1 .venv/bin/python -m pytest -q -rs
+2 failed, 21 passed, 2 skipped in 5.47s
+Failures: a matcher fixture overlooked a valid overlapping continuation, and the
+real-cache fixture tried to read the RoPE hook's position_ids as a positional argument.
+
+After fixing both fixtures:
+.venv/bin/python -m pytest -q -rs
+23 passed, 2 skipped in 3.74s
+
+Final run after putting the real-weight subset and full gates in one ordered test:
+.venv/bin/python -m pytest -q -rs
+23 passed, 1 skipped in 5.36s
+Skipped: test_tinyllama_fp32_exact_match (real weights require --run-weights).

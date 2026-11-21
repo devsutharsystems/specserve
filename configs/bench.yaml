@@ -4,3 +4,5 @@ batch_size: 1
 max_new_tokens: 128
 repeats: 3
 
+max_matching_ngram_size: 3
+prompt_lookup_num_tokens: 8
