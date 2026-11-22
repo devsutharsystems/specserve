@@ -1,7 +1,11 @@
 # Key names are provisional until Day 3's config.py.
 target_model_id: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+model_revision: fe8a4ea1ffedaf415f4da2f062534de366a451e6
+seed: 20261118
 batch_size: 1
 max_new_tokens: 128
+warmups: 1
+warmup_prompt_id: chat_qa-01
 repeats: 3
 
 max_matching_ngram_size: 3

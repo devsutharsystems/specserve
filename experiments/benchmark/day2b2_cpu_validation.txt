@@ -1,0 +1,36 @@
+Day 2b-2 CPU validation
+Base Git commit: 9d17ba3ab25dbb5aaac09d81af0ef58eb565f329
+python=3.12.16
+platform=macOS-27.2.1-arm64-arm-64bit
+torch=2.11.0
+transformers=5.16.1
+tokenizers=0.23.3
+pytest=9.2.0
+PyYAML=6.0.3
+0d6d95d7da83a28ea2f0346cf9d85b859d4dc02352bade4e65ba3e331dca0a06  configs/bench.yaml
+f8d753325a1cc4e52d809e311e47f8182474c6c1504f4c29cd977d1f91289c36  bench/prompts.jsonl
+
+HF_HUB_OFFLINE=1 .venv/bin/python -m pytest -q -rs
+...........................................s..........                   [100%]
+=========================== short test summary info ============================
+SKIPPED [1] tests/test_baselines.py:167: real weights require --run-weights
+53 passed, 1 skipped in 10.79s
+
+The runner tests use CPU fixtures, cached tokenizer files, an initialized tiny Llama,
+and simulated timing. GPU validation and benchmark measurements remain pending.
+
+Day 2b-2 targeted review correction
+Same base Git commit, environment, config SHA-256, and benchmark SHA-256 as above.
+
+HF_HUB_OFFLINE=1 .venv/bin/python -m pytest -q -rs
+...............................................s..........               [100%]
+=========================== short test summary info ============================
+SKIPPED [1] tests/test_baselines.py:167: real weights require --run-weights
+57 passed, 1 skipped in 6.05s
+
+git diff --check
+Exit 0 with no output.
+
+Regression coverage includes unrelated replay pairs, a submitted near_tie
+verdict on a large-gap case, zero-divergence acceptance, and a clean resume
+after a divergent session. The run used CPU fixtures and synthetic timing.
