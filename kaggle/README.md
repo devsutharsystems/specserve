@@ -66,12 +66,46 @@ divergence stops the run before timing. An eligible `near_tie` review lets
 measurements proceed and is recorded in the audit as `reviewed`. Large-gap or
 unexplained cases require investigation and revalidation.
 
+Dev can separately review a reproduced divergence with a completed numerical
+drift diagnostic. For that case, use verdict `dev_approved_numerical_drift`
+in the same review file, with `diagnosis`, `run_identity_sha256`,
+`outputs_sha256`, `diagnostic_dir`, and `diagnostic_sha256`. Use the current
+runner's case ID as the entry key. Stage the diagnostic export's complete
+`evidence/` tree next to or below the review file and set `diagnostic_dir`
+to its relative path. Keep the original audit and tensor files in that tree.
+
+Compute `run_identity_sha256` from the new run's `identity` object and take
+`outputs_sha256` from the paired outputs in the audit row. For
+`diagnostic_sha256`, hash every regular file in `diagnostic_dir` and build
+a JSON object mapping its relative POSIX path to its SHA-256. Hash that
+object using the same canonical encoding as the run identity
+(`json.dumps(value, sort_keys=True, allow_nan=False)` plus one final newline,
+encoded as UTF-8). The runner verifies the complete tree and the recorded
+diagnostic controls before applying Dev's approval to the live replay.
+
+A runner revision changes the run identity and case IDs. For a review-only
+revision, derive the new case ID by hashing the canonical JSON list
+`[identity, prompt_id, method, evidence]` using the revised identity and
+the original audit fields `position`, `reference_token_id`,
+`output_token_id`, `reference_stop`, `output_stop`, `reference_replay`,
+`output_replay`, and `outputs_sha256` as the evidence object. Obtain a new
+Dev approval for that ID. The runner verifies the exact live replay, paired
+outputs and target runtime after both FP32 gates. Changed replay evidence
+requires a new diagnosis and approval. Export the review file and the
+diagnostic tree alongside the benchmark archive.
+
 Automatic speed acceptance requires all correctness gates to pass and zero
 fp16 divergences across untimed audits and measured repeats, including prior
 sessions of the same run. Any recorded divergence sets `requires_dev_review`
 in `run.json` and keeps `speed_results_accepted` false, even with a `near_tie`
 verdict. A completed run with reviewed divergences has session status
 `requires_dev_review`. Dev reviews its evidence and measured results separately.
+
+A failed measured audit stops the run before the next timed repeat. The
+failed audit is saved to `correctness.csv`. Completed repeat checkpoints,
+including the failed repeat if its timing and output were recorded in full,
+remain under `repeats/` for diagnosis. Resume checks each saved repeat
+against the current audit before proceeding to the next one.
 
 Resume by rerunning the same command against the same output root, with the
 review JSON if applicable. The runner verifies the commit, prompt hash, YAML,

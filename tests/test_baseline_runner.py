@@ -343,6 +343,8 @@ class ShapeSensitiveTarget:
     def __init__(self, gap, *, flip=True, lookup_runner_up=4):
         self.gap = gap
         self.flip = flip
+        self.greedy_winner = 4
+        self.lookup_winner = 5
         self.lookup_runner_up = lookup_runner_up
         self.calls = []
 
@@ -359,7 +361,8 @@ class ShapeSensitiveTarget:
                 logits[0, row, 3] = 1.0
             elif position == 11:
                 winner, runner_up = (
-                    (5, self.lookup_runner_up) if self.flip and len(tokens) > 1 else (4, 5)
+                    (self.lookup_winner, self.lookup_runner_up)
+                    if self.flip and len(tokens) > 1 else (self.greedy_winner, 5)
                 )
                 logits[0, row, winner] = 1.0
                 logits[0, row, runner_up] = 1.0 - self.gap
@@ -524,8 +527,8 @@ def test_export_speed_acceptance(
         assert all(row["alpha_hat"] == "" and row["alpha_undefined_reason"] == "zero_trials"
                    for row in rows if row["method"] == "greedy")
     assert (baseline / "bench.yaml").read_bytes() == config_bytes
-    assert (baseline / "timing.csv").is_file()
-    assert (baseline / "iterations.csv").is_file()
+    assert (baseline / "timing.csv").is_file() == (outcome != "blocked")
+    assert (baseline / "iterations.csv").is_file() == (outcome != "blocked")
     correctness = baseline / "correctness.csv"
     with correctness.open(newline="") as source:
         divergences = [json.loads(row["details"]) for row in csv.DictReader(source)
@@ -1007,3 +1010,377 @@ def test_fp16_diagnostic_requires_full_fp32_logit_agreement(
         "lookup_vs_greedy": close, "greedy_vs_uncached": True, "lookup_vs_uncached": close,
     }
     assert comparison["lookup_delta_from_uncached"] == evidence["logit_deltas_from_greedy"][0]
+
+
+@pytest.fixture
+def fp16_drift_review(tmp_path, settings, run_identity, config_bytes):
+    from kaggle.baseline_artifacts import json_bytes, write_correctness, write_json
+    from kaggle.baseline_audit import DRIFT_VERDICT, FP16_EVIDENCE_FIELDS
+
+    item = prompt(budget=4, tokens=[1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 1])
+    target = ShapeSensitiveTarget(2**-10, lookup_runner_up=6)
+    decode = runner.make_decoder(target, 2, settings)
+    reference, output = [decode(method, item) for method in runner.METHODS]
+
+    def compare(identity, reviews=None, **kwargs):
+        return fp16_comparison(
+            "fp16_untimed", "prompt_lookup", item, reference, output,
+            target=target, decode=decode, eos=2, settings=settings,
+            reviews=reviews or {}, identity=identity, **kwargs,
+        )
+
+    original_identity = {**run_identity, "git_commit": "2" * 40}
+    source_row = compare(original_identity)
+    source_case = source_row["details"]
+    assert source_case["near_tie_reviewable"] is False and source_row["status"] == "fail"
+    evidence = {name: source_case[name] for name in FP16_EVIDENCE_FIELDS}
+    case_id = compare(run_identity)["details"]["case_id"]
+    assert case_id != source_case["case_id"]
+    assert case_id == digest(json_bytes([run_identity, item.id, "prompt_lookup", evidence]))
+    runtime = dict.fromkeys(("torch.float32", "torch.float16"), {"attention_implementation": "sdpa"})
+    session_id = "3" * 32
+    source_run_id = "4" * 32
+    root = tmp_path / "evidence"
+    original = root / "original/experiments"
+    archived_name = f"baseline/audits/{session_id}.csv"
+    write_json(original / "env.txt", original_identity)
+    write_json(original / "baseline/run.json", {
+        "identity": original_identity, "target_runtime": runtime,
+        "run_id": source_run_id, "sessions": [{"id": session_id}],
+    })
+    (original / "baseline/bench.yaml").write_bytes(config_bytes)
+    for name in ("baseline/correctness.csv", archived_name):
+        write_correctness(original / name, [source_row])
+    script_hash = "5" * 64
+    write_json(root / "diagnostic.json", {
+        "status": "complete", "result": "numerical_drift_supported_dev_review",
+        "git_commit": original_identity["git_commit"], "script_sha256": script_hash,
+    })
+    write_json(root / "provenance.json", {
+        "case_id": source_case["case_id"], "identity": original_identity, "target_runtime": runtime,
+        "original_run_id": source_run_id, "script_sha256": script_hash,
+        "source_file_sha256": {
+            path.relative_to(original).as_posix(): digest(path.read_bytes())
+            for path in original.rglob("*") if path.is_file()
+        },
+    })
+    reports = {
+        "original-outputs": {"outputs": [reference.token_ids, output.token_ids], "position": 1},
+        "native-invariants": {"structural_checks": True},
+        "retained-kv-comparison": {
+            "first_differing_position": 11, "first_lookup_verification_position": 11, "lookup_rejection_call": 1,
+        },
+        "identical-cache": {
+            "repeat_exact": True, "follows_cache": True, "logits": [[{"winner": 4}] * 2, [{"winner": 5}] * 2],
+        },
+        "fp16-fixed-history": {
+            "structure": True, "matches_native": [True, True], "logits": [{"winner": 4}, {"winner": 5}],
+        },
+        "fp32-fixed-history": {
+            "structure": True, "logits": [{"winner": 4}] * 3,
+            "full_logit_comparison": {
+                "rtol": 1.3e-6, "atol": 1e-5,
+                "pairwise_close": {
+                    "lookup_vs_greedy": True, "greedy_vs_uncached": True, "lookup_vs_uncached": True,
+                },
+            },
+        },
+        **{
+            f"{dtype}-suffix": {"structural_checks": True, "repeat_exact": True, "suffix_influence": False}
+            for dtype in ("fp16", "fp32")
+        },
+        **{
+            f"{method}-trace": source_case[f"{role}_replay"]
+            for method, role in (("greedy", "reference"), ("prompt_lookup", "output"))
+        },
+    }
+    for name, report in reports.items():
+        write_json(root / f"{name}.json", report)
+    for name in (
+        "greedy-retained-kv.pt", "greedy-prediction.pt", "prompt_lookup-retained-kv.pt",
+        "prompt_lookup-prediction.pt", "identical-cache-logits.pt", "fp16-fixed-history-logits.pt",
+        "fp32-fixed-history-logits.pt", "fp16-suffix-tensors.pt", "fp32-suffix-tensors.pt",
+    ):
+        torch.save(torch.tensor([1.0, 2.0]), root / name)
+
+    def tree_hash():
+        return digest(json_bytes({
+            path.relative_to(root).as_posix(): digest(path.read_bytes())
+            for path in root.rglob("*") if path.is_file()
+        }))
+
+    review = {
+        "verdict": DRIFT_VERDICT, "diagnosis": "Synthetic Dev review of diagnosed cache drift.",
+        "run_identity_sha256": digest(json_bytes(run_identity)), "outputs_sha256": evidence["outputs_sha256"],
+        "diagnostic_dir": "evidence", "diagnostic_sha256": tree_hash(),
+    }
+    review_path = tmp_path / "reviews.json"
+
+    def write_review(key=case_id):
+        write_json(review_path, {key: review})
+        return review_path
+
+    write_review()
+    return SimpleNamespace(
+        item=item, target=target, compare=compare, evidence=evidence, case_id=case_id, runtime=runtime,
+        root=root, review=review, review_path=review_path, tree_hash=tree_hash, write_review=write_review,
+        original_identity=original_identity, source_case_id=source_case["case_id"],
+    )
+
+
+@pytest.mark.parametrize("mismatch", [
+    "none", "no-approval", "case-id", "identity-hash", "source-identity", "runtime", "changed-replay",
+])
+def test_fp16_drift_review_binds_live_case(fp16_drift_review, run_identity, mismatch):
+    from kaggle.baseline_artifacts import json_bytes
+
+    fixture = fp16_drift_review
+    identity = run_identity
+    runtime = fixture.runtime
+    path = fixture.review_path
+    if mismatch == "no-approval":
+        path = None
+    elif mismatch == "case-id":
+        path = fixture.write_review(fixture.source_case_id)
+    elif mismatch == "identity-hash":
+        fixture.review["run_identity_sha256"] = digest(json_bytes(fixture.original_identity))
+        path = fixture.write_review()
+    elif mismatch == "source-identity":
+        identity = {**run_identity, "environment": {"device": "changed"}}
+        fixture.review["run_identity_sha256"] = digest(json_bytes(identity))
+        path = fixture.write_review(
+            digest(json_bytes([identity, fixture.item.id, "prompt_lookup", fixture.evidence])),
+        )
+    elif mismatch == "runtime":
+        runtime = {**runtime, "torch.float16": {"attention_implementation": "eager"}}
+    elif mismatch == "changed-replay":
+        fixture.target.gap *= 2
+        changed = fixture.compare(identity)["details"]
+        assert changed["outputs_sha256"] == fixture.review["outputs_sha256"]
+        assert changed["case_id"] != fixture.case_id
+        path = fixture.write_review(changed["case_id"])
+
+    row = fixture.compare(identity, runner.read_reviews(path), target_runtime=runtime)
+    assert row["status"] == ("reviewed" if mismatch == "none" else "fail")
+    assert row["details"]["near_tie_reviewable"] is False
+    if mismatch != "changed-replay":
+        assert all(row["details"][name] == value for name, value in fixture.evidence.items())
+    if mismatch == "none":
+        assert row["details"]["review"]["diagnostic_sha256"] == fixture.review["diagnostic_sha256"]
+        assert row["details"]["review"]["diagnostic"]["case_id"] == fixture.source_case_id
+        assert row["details"]["diagnosis"] == fixture.review["diagnosis"]
+
+
+@pytest.mark.parametrize(("defect", "error"), [
+    ("missing-review-field", "Invalid numerical-drift review entry"),
+    ("wrong-output-hash", "output hash does not match"),
+    ("changed-file", "evidence checksum mismatch"),
+    ("missing-file", "Missing diagnostic tensor evidence"),
+    ("missing-dir", "Missing or invalid diagnostic directory"),
+    ("symlink", "regular files and directories"),
+    ("failed-outcome", "original run provenance is inconsistent"),
+    ("changed-source-case", "Invalid diagnostic evidence"),
+    ("changed-original-audit", "original run provenance is inconsistent"),
+    ("failed-repeat", "cache or fixed-history controls did not pass"),
+    ("inconsistent-repeat", "cache or fixed-history controls did not pass"),
+    ("failed-fp32-winner", "cache or fixed-history controls did not pass"),
+    ("failed-fp32-vector", "cache or fixed-history controls did not pass"),
+    ("failed-suffix", "rejected-suffix control did not pass"),
+])
+def test_fp16_drift_review_rejects_invalid_diagnostic(fp16_drift_review, defect, error):
+    fixture = fp16_drift_review
+    root = fixture.root
+    tensor = root / "fp32-fixed-history-logits.pt"
+
+    def change_report(name, key, value):
+        path = root / name
+        report = json.loads(path.read_bytes())
+        report[key] = value
+        path.write_text(json.dumps(report))
+
+    if defect == "missing-review-field":
+        del fixture.review["diagnostic_sha256"]
+    elif defect == "wrong-output-hash":
+        fixture.review["outputs_sha256"] = "9" * 64
+    elif defect == "changed-file":
+        tensor.write_bytes(b"changed tensor")
+    elif defect == "missing-file":
+        tensor.unlink()
+    elif defect == "missing-dir":
+        fixture.review["diagnostic_dir"] = "missing"
+    elif defect == "symlink":
+        tensor.rename(root / "replacement.pt")
+        tensor.symlink_to("replacement.pt")
+    elif defect == "failed-outcome":
+        change_report("diagnostic.json", "result", "unresolved")
+    elif defect == "changed-source-case":
+        change_report("provenance.json", "case_id", "0" * 64)
+    elif defect == "changed-original-audit":
+        (root / "original/experiments/baseline/correctness.csv").write_bytes(b"changed audit")
+    elif defect == "failed-repeat":
+        change_report("identical-cache.json", "repeat_exact", False)
+    elif defect == "inconsistent-repeat":
+        change_report("identical-cache.json", "logits", [[{"winner": 4}] * 2, [{"winner": 7}] * 2])
+    elif defect == "failed-fp32-winner":
+        change_report("fp32-fixed-history.json", "logits", [{"winner": 4}, {"winner": 5}, {"winner": 4}])
+    elif defect == "failed-fp32-vector":
+        change_report("fp32-fixed-history.json", "full_logit_comparison", {
+            "rtol": 1.3e-6, "atol": 1e-5, "pairwise_close": {
+                "lookup_vs_greedy": False, "greedy_vs_uncached": True, "lookup_vs_uncached": False,
+            },
+        })
+    elif defect == "failed-suffix":
+        change_report("fp16-suffix.json", "suffix_influence", True)
+    if defect not in ("missing-review-field", "changed-file", "symlink"):
+        fixture.review["diagnostic_sha256"] = fixture.tree_hash()
+
+    with pytest.raises(ValueError, match=error):
+        runner.read_reviews(fixture.write_review())
+
+
+@pytest.mark.parametrize(("scenario", "blocked_stage"), [
+    ("approved", None),
+    ("first-fp32", "fp32_first_20"),
+    ("full-fp32", "fp32_full"),
+    ("unexplained", "fp16_audit"),
+    ("first-measured-repeat", "measuring"),
+    ("changed-repeat", "measuring"),
+])
+def test_fp16_drift_review_preserves_runner_gates(
+    tmp_path, settings, run_identity, config_bytes, generation_config, fp16_drift_review,
+    monkeypatch, scenario, blocked_stage,
+):
+    fixture = fp16_drift_review
+    root = tmp_path / "checkout"
+    (root / "configs").mkdir(parents=True)
+    (root / "configs/bench.yaml").write_bytes(config_bytes)
+    monkeypatch.setattr(runner, "ROOT", root)
+    monkeypatch.setattr(runner, "verify_checkout", lambda _root, sha: sha)
+    monkeypatch.setattr(runner, "read_frozen", lambda *_args: [])
+    monkeypatch.setattr(runner, "validate_environment", lambda: run_identity["environment"])
+    monkeypatch.setattr(runner.torch.cuda, "get_device_properties", lambda _index: object())
+    monkeypatch.setattr(runner.torch.cuda, "synchronize", lambda: None)
+    monkeypatch.setattr(runner, "preflight_tokenizer_and_generation",
+                        lambda: (SimpleNamespace(eos_token_id=2), generation_config))
+    prompts = [fixture.item] + [
+        prompt(f"chat_qa-{index:02d}", budget=fixture.item.budget, tokens=fixture.item.token_ids)
+        for index in range(2, 7)
+    ]
+    monkeypatch.setattr(runner, "tokenize_prompts", lambda *_args: prompts)
+    if scenario == "unexplained":
+        fixture.review.clear()
+        fixture.review.update(verdict="unexplained", diagnosis="Further evidence required.")
+        fixture.write_review()
+
+    fp32 = ShapeSensitiveTarget(2**-10, flip=False)
+
+    def hf_generate(inputs, **kwargs):
+        failed = scenario == "first-fp32" or (scenario == "full-fp32" and inputs is prompts[-1].tensor)
+        continuation = [3, 2] if failed else [3, 4, 2]
+        return torch.cat((inputs, torch.tensor([continuation])), dim=1)
+
+    fp32.generate = hf_generate
+    fp16 = fixture.target
+    original_make_decoder = runner.make_decoder
+
+    def make_decoder(target, eos, settings):
+        wrapped = original_make_decoder(target, eos, settings)
+
+        def decode(method, item, **kwargs):
+            if target is fp16:
+                # Only the reviewed prompt diverges. Change its measured
+                # output in one scenario while preserving a complete repeat.
+                fp16.flip = item.id == fixture.item.id
+            return wrapped(method, item, **kwargs)
+
+        return decode
+
+    monkeypatch.setattr(runner, "make_decoder", make_decoder)
+    original_benchmark = runner.benchmark
+    original_measurements = runner.run_measurements
+    original_measure = runner.measure
+    measuring = []
+    timed_calls = []
+
+    def benchmark(items, settings, manifest, directory, session, _make_target, *args):
+        manifest["target_runtime"] = fixture.runtime
+        fp16.greedy_winner = 4
+        targets = {torch.float32: fp32, torch.float16: fp16}
+        return original_benchmark(
+            items, settings, manifest, directory, session, targets.__getitem__, *args,
+            clock=iter(range(500)).__next__,
+        )
+
+    def run_measurements(*args):
+        measuring.append(True)
+        if scenario == "first-measured-repeat":
+            fp16.greedy_winner = 7
+        elif scenario == "changed-repeat":
+            fp16.lookup_winner = 7
+        return original_measurements(*args)
+
+    def measure(decode, method, item, synchronize, clock):
+        timed_calls.append((method, item.id))
+        return original_measure(decode, method, item, synchronize, clock)
+
+    monkeypatch.setattr(runner, "benchmark", benchmark)
+    monkeypatch.setattr(runner, "run_measurements", run_measurements)
+    monkeypatch.setattr(runner, "measure", measure)
+    output = tmp_path / "run"
+    if blocked_stage:
+        with pytest.raises(RuntimeError, match="exact-match failed|fp16 audit"):
+            runner.execute(output, run_identity["git_commit"], fixture.review_path)
+    else:
+        runner.execute(output, run_identity["git_commit"], fixture.review_path)
+
+    baseline = output / "experiments/baseline"
+    metadata = json.loads((baseline / "run.json").read_bytes())
+    assert metadata["speed_results_accepted"] is False
+    assert bool(measuring) == (scenario in ("approved", "first-measured-repeat", "changed-repeat"))
+    session = metadata["sessions"][-1]
+    with (baseline / "correctness.csv").open(newline="") as stream:
+        audit_rows = list(csv.DictReader(stream))
+    if blocked_stage:
+        assert session["status"] == "blocked"
+        if blocked_stage.startswith("fp32"):
+            assert session["failed_stage"] == "fp32_gates"
+            assert [row["stage"] for row in audit_rows if row["status"] == "fail"] == [blocked_stage]
+        else:
+            assert session["failed_stage"] == blocked_stage
+    else:
+        assert session["status"] == "requires_dev_review" and metadata["requires_dev_review"] is True
+        assert len([row for row in audit_rows if row["status"] == "reviewed"]) == 1 + settings["repeats"]
+        assert (baseline / "summary.json").is_file()
+    if scenario in ("first-measured-repeat", "changed-repeat"):
+        failed_method = "greedy" if scenario == "first-measured-repeat" else "prompt_lookup"
+        expected_calls = [] if failed_method == "greedy" else [
+            ("greedy", item.id) for item in prompts for _ in range(settings["repeats"])
+        ]
+        assert timed_calls == [*expected_calls, (failed_method, fixture.item.id)]
+        failed, = [row for row in audit_rows if row["stage"] == "fp16_measured" and row["status"] == "fail"]
+        assert (failed["method"], failed["prompt_id"], failed["repeat"]) == (failed_method, fixture.item.id, "1")
+        details = json.loads(failed["details"])
+        assert details["case_id"] != fixture.case_id and details["review"] is None
+        assert details["outputs_sha256"] != fixture.review["outputs_sha256"]
+        assert session["fp16_divergences"]["fp16_measured"] == 1
+        archived = baseline / "audits" / f'{session["id"]}.csv'
+        original_audit = (baseline / "correctness.csv").read_bytes()
+        assert archived.read_bytes() == original_audit
+        repeats = baseline / "repeats"
+        checkpoints = list(repeats.rglob("*.json"))
+        assert len(checkpoints) == len(timed_calls)
+        checkpoint = repeats / failed_method / fixture.item.id / "1.json"
+        original_checkpoint = checkpoint.read_bytes()
+        assert json.loads(original_checkpoint)["payload"]["unit"]["token_ids"] == [3, 7, 2]
+        assert not (checkpoint.parent / "2.json").exists()
+        assert not (baseline / "summary.json").exists()
+
+        if scenario == "first-measured-repeat":
+            timed_calls.clear()
+            with pytest.raises(RuntimeError, match=r"Measured fp16 audit.*greedy.*chat_qa-01.*repeat 1"):
+                runner.execute(output, run_identity["git_commit"], fixture.review_path)
+            resumed = json.loads((baseline / "run.json").read_bytes())["sessions"][-1]
+            assert resumed["status"] == "blocked" and resumed["reused_repeats"] == 1
+            assert not timed_calls
+            assert checkpoint.read_bytes() == original_checkpoint
+            assert archived.read_bytes() == original_audit

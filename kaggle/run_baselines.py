@@ -1,7 +1,9 @@
 """Run the approved Day 2b-2 baselines on one Kaggle T4. See kaggle/README.md."""
 
 import argparse
+import csv
 import fcntl
+import io
 import json
 import math
 import os
@@ -30,12 +32,12 @@ from huggingface_hub import hf_hub_download
 from transformers import GenerationConfig, LlamaForCausalLM
 
 from kaggle.baseline_artifacts import (
-    ITERATION_FIELDS, ITERATIONS, TIMING, complete_unit, digest, load_repeat, open_run,
+    CORRECTNESS, ITERATION_FIELDS, ITERATIONS, TIMING, complete_unit, digest, json_bytes, load_repeat, open_run,
     repeat_path, save_repeat,
     stop_reason, throughput, write_correctness, write_csv, write_json, write_summaries,
 )
 from kaggle.baseline_audit import (
-    check_row, first_five_per_category, fp16_comparison, fp32_gate,
+    DRIFT_VERDICT, FP16_EVIDENCE_FIELDS, check_row, first_five_per_category, fp16_comparison, fp32_gate,
 )
 from specserve.decode.greedy import DecodeIteration, DecodeResult, greedy_decode
 from specserve.decode.prompt_lookup import prompt_lookup_decode
@@ -341,18 +343,25 @@ def benchmark(prompts, settings, manifest, directory, session, make_target, gene
         audit.append(fp16_comparison(
             "fp16_untimed", "prompt_lookup", prompt, reference, decode("prompt_lookup", prompt),
             target=target, decode=decode, eos=eos, settings=settings,
-            reviews=reviews, identity=manifest["identity"],
+            reviews=reviews, identity=manifest["identity"], target_runtime=manifest.get("target_runtime"),
         ))
     persist()
     if any(row["status"] == "fail" for row in audit):
         raise RuntimeError("Untimed fp16 audit has unresolved divergences. See correctness.csv.")
 
     def audit_repeat(method, prompt, repeat, result):
-        audit.append(fp16_comparison(
+        row = fp16_comparison(
             "fp16_measured", method, prompt, references[prompt.id], result, target=target,
             decode=decode, eos=eos, settings=settings, reviews=reviews,
-            identity=manifest["identity"], repeat=repeat,
-        ))
+            identity=manifest["identity"], repeat=repeat, target_runtime=manifest.get("target_runtime"),
+        )
+        audit.append(row)
+        if row["status"] == "fail":
+            persist()
+            raise RuntimeError(
+                f"Measured fp16 audit failed for {method} on {prompt.id} repeat {repeat}. "
+                f"{row['details']['diagnosis']} See correctness.csv."
+            )
 
     session["status"] = "measuring"
     persist()
@@ -360,6 +369,141 @@ def benchmark(prompts, settings, manifest, directory, session, make_target, gene
         prompts, settings, manifest, directory, session, decode, eos, synchronize,
         persist, audit_repeat, clock,
     )
+
+
+def _sha256_string(value):
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _read_drift_diagnostic(review_path, review):
+    relative = Path(review["diagnostic_dir"])
+    root = review_path.parent
+    if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+        raise ValueError("Diagnostic directory must be relative to the review file")
+    for part in relative.parts:
+        root = root / part
+        if root.is_symlink() or not root.is_dir():
+            raise ValueError("Missing or invalid diagnostic directory")
+
+    # Hash every artifact. Retain the report bytes from that same read for
+    # validation and avoid loading any serialized tensors.
+    hashes, data = {}, {}
+    for path in root.rglob("*"):
+        if path.is_symlink() or not (path.is_file() or path.is_dir()):
+            raise ValueError("Diagnostic tree must contain regular files and directories")
+        if path.is_file():
+            name = path.relative_to(root).as_posix()
+            content = path.read_bytes()
+            hashes[name] = digest(content)
+            if path.suffix in {".json", ".csv", ".txt"}:
+                data[name] = content
+    if digest(json_bytes(hashes)) != review["diagnostic_sha256"]:
+        raise ValueError("Diagnostic evidence checksum mismatch")
+
+    required_tensors = (
+        "greedy-retained-kv.pt", "greedy-prediction.pt",
+        "prompt_lookup-retained-kv.pt", "prompt_lookup-prediction.pt", "identical-cache-logits.pt",
+        "fp16-fixed-history-logits.pt", "fp32-fixed-history-logits.pt",
+        "fp16-suffix-tensors.pt", "fp32-suffix-tensors.pt",
+    )
+    if any(name not in hashes or hashes[name] == digest(b"") for name in required_tensors):
+        raise ValueError("Missing diagnostic tensor evidence")
+
+    def report(name):
+        parsed = json.loads(data[name])
+        if not isinstance(parsed, dict):
+            raise ValueError(f"Invalid diagnostic report: {name}")
+        return parsed
+
+    source = "original/experiments/"
+    provenance = report("provenance.json")
+    state = report("diagnostic.json")
+    identity = provenance["identity"]
+    runtime = provenance["target_runtime"]
+    source_manifest = report(f"{source}baseline/run.json")
+    archived = f'baseline/audits/{source_manifest["sessions"][-1]["id"]}.csv'
+    original_hashes = {
+        name: hashes[source + name] for name in (
+            "env.txt", "baseline/run.json", "baseline/bench.yaml", "baseline/correctness.csv", archived,
+        )
+    }
+    if (
+        state["status"] != "complete" or state["result"] != "numerical_drift_supported_dev_review"
+        or not _sha256_string(provenance["script_sha256"])
+        or state["script_sha256"] != provenance["script_sha256"]
+        or state["git_commit"] != identity["git_commit"]
+        or provenance["source_file_sha256"] != original_hashes
+        or source_manifest["identity"] != identity or report(f"{source}env.txt") != identity
+        or source_manifest["run_id"] != provenance["original_run_id"]
+        or set(runtime) != {"torch.float32", "torch.float16"} or source_manifest["target_runtime"] != runtime
+        or identity["config_sha256"] != original_hashes["baseline/bench.yaml"]
+        or original_hashes[archived] != original_hashes["baseline/correctness.csv"]
+    ):
+        raise ValueError("Diagnostic outcome or original run provenance is inconsistent")
+
+    original_outputs = report("original-outputs.json")
+    if digest(json_bytes(original_outputs["outputs"])) != review["outputs_sha256"]:
+        raise ValueError("Diagnostic output hash does not match the approval")
+
+    source_rows = csv.DictReader(io.StringIO(data[f"{source}baseline/correctness.csv"].decode()), strict=True)
+    if tuple(source_rows.fieldnames or ()) != CORRECTNESS:
+        raise ValueError("Invalid original audit CSV")
+    source_cases = []
+    for row in source_rows:
+        if row["stage"] == "fp16_untimed":
+            details = json.loads(row["details"])
+            if details.get("case_id") == provenance["case_id"]:
+                source_cases.append((row, details))
+    (row, case), = source_cases
+    evidence = {key: case[key] for key in FP16_EVIDENCE_FIELDS}
+    if (
+        row["status"] not in {"fail", "reviewed"}
+        or digest(json_bytes([identity, row["prompt_id"], row["method"], evidence])) != provenance["case_id"]
+        or case["outputs_sha256"] != review["outputs_sha256"]
+        or case["position"] != original_outputs["position"]
+    ):
+        raise ValueError("Diagnostic source case does not match the original audit")
+
+    cache = report("retained-kv-comparison.json")
+    repeat = report("identical-cache.json")
+    fp16 = report("fp16-fixed-history.json")
+    fp32 = report("fp32-fixed-history.json")
+    comparison = fp32["full_logit_comparison"]
+    fp32_winners = [item["winner"] for item in fp32["logits"]]
+    fp16_winners = [item["winner"] for item in fp16["logits"]]
+    repeat_winners = [[item["winner"] for item in arm] for arm in repeat["logits"]]
+    audited_winners = [case["reference_token_id"], case["output_token_id"]]
+    pairwise = comparison["pairwise_close"]
+    if (
+        report("native-invariants.json")["structural_checks"] is not True
+        or any(type(cache[key]) is not int or cache[key] < 0 for key in (
+            "first_differing_position", "first_lookup_verification_position", "lookup_rejection_call",
+        ))
+        or cache["first_differing_position"] < cache["first_lookup_verification_position"]
+        or repeat["repeat_exact"] is not True or repeat["follows_cache"] is not True
+        or repeat_winners != [[winner, winner] for winner in audited_winners]
+        or fp16["structure"] is not True or len(fp16["matches_native"]) != 2
+        or any(match is not True for match in fp16["matches_native"])
+        or fp16_winners != audited_winners
+        or fp32["structure"] is not True or len(fp32_winners) != 3 or len(set(fp32_winners)) != 1
+        or comparison["rtol"] != 1.3e-6 or comparison["atol"] != 1e-5
+        or set(pairwise) != {"lookup_vs_greedy", "greedy_vs_uncached", "lookup_vs_uncached"}
+        or any(match is not True for match in pairwise.values())
+    ):
+        raise ValueError("Diagnostic cache or fixed-history controls did not pass")
+    for dtype in ("fp16", "fp32"):
+        suffix = report(f"{dtype}-suffix.json")
+        if (suffix["structural_checks"] is not True or suffix["repeat_exact"] is not True
+                or suffix["suffix_influence"] is not False):
+            raise ValueError(f"Diagnostic rejected-suffix control did not pass in {dtype}")
+    for method, role in (("greedy", "reference"), ("prompt_lookup", "output")):
+        trace = report(f"{method}-trace.json")
+        if trace["reproduced"] is not True or trace["prediction"] != case[f"{role}_replay"]["prediction"]:
+            raise ValueError(f"Diagnostic {method} replay does not match the original audit")
+    return {
+        "case_id": provenance["case_id"], "identity": identity, "target_runtime": runtime,
+        "original_run_id": provenance["original_run_id"], "script_sha256": provenance["script_sha256"],
+    }
 
 
 def read_reviews(path):
@@ -370,11 +514,25 @@ def read_reviews(path):
         raise ValueError("Reviews must map case IDs to verdicts and written diagnoses")
     for case_id, review in reviews.items():
         if (
-            not re.fullmatch(r"[0-9a-f]{64}", case_id) or not isinstance(review, dict)
-            or set(review) != {"verdict", "diagnosis"}
-            or review["verdict"] not in {"near_tie", "unexplained"}
-            or not isinstance(review["diagnosis"], str) or not review["diagnosis"].strip()
+            not _sha256_string(case_id) or not isinstance(review, dict)
+            or not isinstance(review.get("diagnosis"), str) or not review["diagnosis"].strip()
         ):
+            raise ValueError("Invalid review entry")
+        verdict = review.get("verdict")
+        fields = {"verdict", "diagnosis"}
+        if verdict == DRIFT_VERDICT:
+            hashes = {"run_identity_sha256", "outputs_sha256", "diagnostic_sha256"}
+            if (
+                set(review) != fields | hashes | {"diagnostic_dir"}
+                or not all(_sha256_string(review[name]) for name in hashes)
+                or not isinstance(review["diagnostic_dir"], str) or not review["diagnostic_dir"].strip()
+            ):
+                raise ValueError(f"Invalid numerical-drift review entry: {case_id}")
+            try:
+                review["diagnostic"] = _read_drift_diagnostic(path, review)
+            except (AttributeError, csv.Error, KeyError, IndexError, OSError, TypeError, ValueError) as error:
+                raise ValueError(f"Invalid diagnostic evidence for {case_id}: {error}") from error
+        elif verdict not in ("near_tie", "unexplained") or set(review) != fields:
             raise ValueError("Invalid review entry")
     return reviews
 

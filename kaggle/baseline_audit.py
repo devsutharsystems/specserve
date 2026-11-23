@@ -9,6 +9,13 @@ from kaggle.baseline_artifacts import digest, json_bytes, stop_reason
 from specserve.decode.prompt_lookup import find_proposal
 
 
+DRIFT_VERDICT = "dev_approved_numerical_drift"
+FP16_EVIDENCE_FIELDS = (
+    "position", "reference_token_id", "output_token_id", "reference_stop", "output_stop",
+    "reference_replay", "output_replay", "outputs_sha256",
+)
+
+
 def check_row(stage, method, prompt_id, *, status, repeat=None, **details):
     return {
         "stage": stage, "method": method, "prompt_id": prompt_id,
@@ -190,8 +197,40 @@ def _near_tie_candidate(reference, output, reference_id, output_id):
     )
 
 
+def _drift_review_matches(review, identity, target_runtime, prompt_id, method, evidence):
+    diagnostic = review.get("diagnostic")
+    if (
+        diagnostic is None or review["run_identity_sha256"] != digest(json_bytes(identity))
+        or review["outputs_sha256"] != evidence["outputs_sha256"]
+        or diagnostic["target_runtime"] != target_runtime
+    ):
+        return False
+    source_identity = diagnostic["identity"]
+    if {**source_identity, "git_commit": identity["git_commit"]} != identity:
+        return False
+    # The old evidence is reusable across a review-only commit. The approval
+    # itself must still match the live case ID and identity digest.
+    if digest(json_bytes([source_identity, prompt_id, method, evidence])) != diagnostic["case_id"]:
+        return False
+    for role in ("reference", "output"):
+        token = evidence[f"{role}_token_id"]
+        replay = evidence[f"{role}_replay"]
+        stop = evidence[f"{role}_stop"]
+        prediction = replay["prediction"]
+        if (
+            token is None or not replay["reproduced"] or not prediction
+            or prediction["source"] != "original_shape_replay" or not prediction["prefix_matches"]
+            or prediction["top_two"] is None or prediction["top_two"]["ids"][0] != token
+            or not math.isfinite(prediction["top_two"]["gap"])
+            or stop["reason"] not in {"budget", "eos"}
+            or stop["stopped_on_eos"] != (stop["reason"] == "eos")
+        ):
+            return False
+    return True
+
+
 def fp16_comparison(stage, method, prompt, reference, result, *, target, decode, eos,
-                    settings, reviews, identity, repeat=None):
+                    settings, reviews, identity, repeat=None, target_runtime=None):
     position = first_difference(reference.token_ids, result.token_ids)
     if position is None:
         reference_stop = _stop(reference, prompt, eos)
@@ -226,12 +265,18 @@ def fp16_comparison(stage, method, prompt, reference, result, *, target, decode,
         reference_replay["prediction"], output_replay["prediction"], ref_id, out_id,
     )
     review = reviews.get(case_id)
-    reviewed = bool(candidate and review and review["verdict"] == "near_tie")
+    drift_review = bool(review and review["verdict"] == DRIFT_VERDICT)
+    reviewed = (
+        _drift_review_matches(review, identity, target_runtime, prompt.id, method, evidence)
+        if drift_review else bool(candidate and review and review["verdict"] == "near_tie")
+    )
     if not reference_replay["reproduced"] or not output_replay["reproduced"]:
         diagnosis = "A replay did not reproduce the original output and iteration trace."
     elif ref_id is None or out_id is None:
         diagnosis = "Length-only divergence at a shared prefix. Inspect the stopping decisions."
-    elif candidate and review:
+    elif drift_review and not reviewed:
+        diagnosis = "Dev's numerical-drift approval does not match the live audit evidence."
+    elif reviewed or (candidate and review):
         diagnosis = review["diagnosis"]
     elif candidate:
         diagnosis = "The original forward shapes reproduced the flip. Review both logit gaps."
