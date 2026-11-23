@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from .config import DraftConfig
+from .kv_cache import LayerKV
 
 
 class RMSNorm(nn.Module):
@@ -54,19 +55,30 @@ class CausalSelfAttention(nn.Module):
         self.rope = RotaryEmbedding(config.head_dim, config.context_length, config.rope_base)
 
     def forward(self, x: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        output, _ = self.forward_cached(x, positions, past=None, mask=None)
+        return output
+
+    def forward_cached(
+        self, x: torch.Tensor, positions: torch.Tensor,
+        past: LayerKV | None, mask: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, LayerKV]:
         batch, time, width = x.shape
         heads_shape = (batch, time, self.n_head, self.head_dim)
         query = self.q_proj(x).reshape(heads_shape).transpose(1, 2)
         key = self.k_proj(x).reshape(heads_shape).transpose(1, 2)
         value = self.v_proj(x).reshape(heads_shape).transpose(1, 2)
         query = self.rope(query, positions)
-        key = self.rope(key, positions)
+        layer = LayerKV(self.rope(key, positions), value)
+        if past is not None:
+            layer = past.append(layer)
 
-        # Full-sequence Q and K lengths match, so the causal mask aligns here.
+        # SDPA's built-in causal mask aligns only when Q and K lengths match.
         attended = F.scaled_dot_product_attention(
-            query, key, value, is_causal=True, dropout_p=self.dropout,
+            query, layer.keys, layer.values, attn_mask=mask,
+            is_causal=past is None, dropout_p=self.dropout,
         )
-        return self.o_proj(attended.transpose(1, 2).reshape(batch, time, width))
+        output = self.o_proj(attended.transpose(1, 2).reshape(batch, time, width))
+        return output, layer
 
 
 class SwiGLU(nn.Module):
@@ -89,5 +101,14 @@ class TransformerBlock(nn.Module):
         self.swiglu = SwiGLU(config)
 
     def forward(self, x: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
-        x = x + self.attention(self.attn_norm(x), positions)
+        return self._feed_forward(x + self.attention(self.attn_norm(x), positions))
+
+    def forward_cached(
+        self, x: torch.Tensor, positions: torch.Tensor,
+        past: LayerKV | None, mask: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, LayerKV]:
+        attended, layer = self.attention.forward_cached(self.attn_norm(x), positions, past, mask)
+        return self._feed_forward(x + attended), layer
+
+    def _feed_forward(self, x: torch.Tensor) -> torch.Tensor:
         return x + self.swiglu(self.ffn_norm(x))

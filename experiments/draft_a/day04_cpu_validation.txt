@@ -1,0 +1,70 @@
+Day 4 draft KV-cache correctness validation
+Base commit: 8e742c06e61ed94b36f3d8497271d119a3eeaaf1
+branch=diagnostics/fp16-t4
+device=cpu
+dtype=torch.float32
+python=3.12.16
+platform=macOS-27.2.1-arm64-arm-64bit
+torch=2.11.0
+transformers=5.16.1
+tokenizers=0.23.3
+PyYAML=6.0.3
+pytest=9.2.0
+model_and_full_config_token_seed=20261118
+config=configs/draft_a.yaml
+config_sha256=cc174d6ce9de4eb90aa7849ed2237af5042a9c8995adf8b2aadb6e5932a3c5d6
+toy_overrides=vocab_size=32, d_model=16, n_layer=2, n_head=4, hidden_dim=32, context_length=16
+logit_agreement_rtol=1.3e-6
+logit_agreement_atol=1e-5
+
+HF_HUB_OFFLINE=1 .venv/bin/python -m pytest -q -rs -s tests/test_draft_kv_cache.py
+max_abs_logit_diff[toy (8,) rows 0:8]=0.0
+.max_abs_logit_diff[toy (3, 1, 1, 1, 1, 1) rows 0:3]=1.1175870895385742e-08
+max_abs_logit_diff[toy (3, 1, 1, 1, 1, 1) rows 3:4]=1.4901161193847656e-08
+max_abs_logit_diff[toy (3, 1, 1, 1, 1, 1) rows 4:5]=7.450580596923828e-09
+max_abs_logit_diff[toy (3, 1, 1, 1, 1, 1) rows 5:6]=1.4901161193847656e-08
+max_abs_logit_diff[toy (3, 1, 1, 1, 1, 1) rows 6:7]=2.9802322387695312e-08
+max_abs_logit_diff[toy (3, 1, 1, 1, 1, 1) rows 7:8]=1.4901161193847656e-08
+.max_abs_logit_diff[toy (3, 2, 3) rows 0:3]=1.1175870895385742e-08
+max_abs_logit_diff[toy (3, 2, 3) rows 3:5]=7.450580596923828e-09
+max_abs_logit_diff[toy (3, 2, 3) rows 5:8]=1.4901161193847656e-08
+.max_abs_logit_diff[toy (1, 3, 4) rows 0:1]=2.9802322387695312e-08
+max_abs_logit_diff[toy (1, 3, 4) rows 1:4]=1.4901161193847656e-08
+max_abs_logit_diff[toy (1, 3, 4) rows 4:8]=2.9802322387695312e-08
+..max_abs_logit_diff[prefill greedy step 0]=0.0
+max_abs_logit_diff[prefill greedy step 1]=0.0
+max_abs_logit_diff[prefill greedy step 2]=2.9802322387695312e-08
+max_abs_logit_diff[prefill greedy step 3]=7.450580596923828e-09
+max_abs_logit_diff[prefill greedy step 4]=2.9802322387695312e-08
+max_abs_logit_diff[prefill final greedy row]=1.4901161193847656e-08
+..max_abs_logit_diff[replacement after crop]=0.0
+max_abs_logit_diff[after crop greedy step 0]=0.0
+max_abs_logit_diff[after crop greedy step 1]=1.4901161193847656e-08
+max_abs_logit_diff[after crop greedy step 2]=7.450580596923828e-09
+max_abs_logit_diff[after crop final greedy row]=7.450580596923828e-09
+.max_abs_logit_diff[end of toy context]=2.9802322387695312e-08
+........max_abs_logit_diff[retry after second block failure]=7.450580596923828e-09
+.max_abs_logit_diff[retry after logit projection failure]=7.450580596923828e-09
+..max_abs_logit_diff[draft-a rows 0:3]=1.9073486328125e-06
+max_abs_logit_diff[draft-a rows 3:4]=2.0265579223632812e-06
+max_abs_logit_diff[draft-a rows 4:8]=2.384185791015625e-06
+draft_a_trainable_parameters=35658240
+.
+20 passed in 2.71s
+
+Maximum absolute cached-versus-uncached logit difference across 30 comparisons: 2.384185791015625e-06 (draft-a rows 4:8).
+Every compared row agreed on its greedy token ID. Crop and regenerate, future-token isolation, failed-update rollback, and uncached backward passed.
+The toy model filled its configured context exactly. The Draft-A test rejected an append to 1,025 tokens and verified the retained state was unchanged.
+
+HF_HUB_OFFLINE=1 .venv/bin/python -m pytest -q -rs tests/test_draft_model.py
+.....................                                                    [100%]
+21 passed in 6.12s
+
+HF_HUB_OFFLINE=1 .venv/bin/python -m pytest -q -rs
+........................................................................ [ 50%]
+...................s...................................................  [100%]
+=========================== short test summary info ============================
+SKIPPED [1] tests/test_baselines.py:167: real weights require --run-weights
+142 passed, 1 skipped in 7.79s
+
+git diff --check passed.
