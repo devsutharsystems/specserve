@@ -1,4 +1,3 @@
-# Key names are provisional until Day 3's config.py.
 d_model: 512
 n_layer: 6
 n_head: 8
@@ -6,4 +5,8 @@ hidden_dim: 1408
 context_length: 1024
 vocab_size: 32000
 tokenizer_model_id: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+rope_base: 10000.0
+rms_norm_eps: 1.0e-6
+dropout: 0.0
+init_std: 0.02
 

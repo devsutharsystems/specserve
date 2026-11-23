@@ -1,0 +1,61 @@
+Day 3 draft architecture CPU validation
+Base commit: e2be7f4ed88b5395622dce10d193e3921a931f37
+python=3.12.16
+platform=macOS-27.2.1-arm64-arm-64bit
+device=cpu
+torch=2.11.0
+transformers=5.16.1
+tokenizers=0.23.3
+PyYAML=6.0.3
+pytest=9.2.0
+cc174d6ce9de4eb90aa7849ed2237af5042a9c8995adf8b2aadb6e5932a3c5d6  configs/draft_a.yaml
+
+HF_HUB_OFFLINE=1 .venv/bin/python -m pytest -q -rs -s tests/test_draft_model.py
+tokenizer=TinyLlama/TinyLlama-1.1B-Chat-v1.0@fe8a4ea1ffedaf415f4da2f062534de366a451e6, vocabulary=32000
+...................draft_config={'d_model': 512, 'n_layer': 6, 'n_head': 8, 'hidden_dim': 1408, 'context_length': 1024, 'vocab_size': 32000, 'tokenizer_model_id': 'TinyLlama/TinyLlama-1.1B-Chat-v1.0', 'rope_base': 10000.0, 'rms_norm_eps': 1e-06, 'dropout': 0.0, 'init_std': 0.02}
+model_and_token_seed=20261118
+parameter_counts={'token_embedding': 16384000, 'attention': 6291456, 'swiglu': 12976128, 'block_rmsnorm': 6144, 'final_rmsnorm': 512, 'total': 35658240}
+initial_logits_shape=(1, 8, 32000)
+initial_loss=10.653745651245117, log_vocab=10.373491181781864, abs_deviation=0.2802544694632534
+.F
+=================================== FAILURES ===================================
+___________________ test_draft_tied_projection_and_backward ____________________
+
+toy_config = DraftConfig(d_model=16, n_layer=2, n_head=4, hidden_dim=32, context_length=16, vocab_size=32, tokenizer_model_id='TinyLlama/TinyLlama-1.1B-Chat-v1.0', rope_base=10000.0, rms_norm_eps=1e-06, dropout=0.0, init_std=0.02)
+
+    def test_draft_tied_projection_and_backward(toy_config):
+        model = seeded_model(toy_config)
+        ids = torch.tensor([[1, 5, 9]])
+        unused = toy_config.vocab_size - 1
+        vocab_weights = [
+            parameter for parameter in model.parameters()
+            if parameter.shape == (toy_config.vocab_size, toy_config.d_model)
+        ]
+>       assert len(vocab_weights) == 1 and vocab_weights[0] is model.token_embedding.weight
+E       assert (5 == 1)
+E        +  where 5 = len([Parameter containing:\ntensor([[-5.5633e-03,  2.2301e-02, -3.7617e-03, -1.6634e-02, -1.1633e-02,\n          1.9310e-02,...\n         -1.3814e-02, -2.9504e-02, -4.4831e-03, -4.3003e-02,  7.3573e-03,\n         -2.1410e-02]], requires_grad=True)])
+
+tests/test_draft_model.py:231: AssertionError
+1 failed, 20 passed in 8.43s
+
+Focused test correction
+The first weight-tying check counted SwiGLU weights because the toy hidden and vocabulary sizes match. The check now tests output dependence on an unused embedding row and the gradient through that row.
+
+HF_HUB_OFFLINE=1 .venv/bin/python -m pytest -q -rs -s tests/test_draft_model.py
+tokenizer=TinyLlama/TinyLlama-1.1B-Chat-v1.0@fe8a4ea1ffedaf415f4da2f062534de366a451e6, vocabulary=32000
+...................draft_config={'d_model': 512, 'n_layer': 6, 'n_head': 8, 'hidden_dim': 1408, 'context_length': 1024, 'vocab_size': 32000, 'tokenizer_model_id': 'TinyLlama/TinyLlama-1.1B-Chat-v1.0', 'rope_base': 10000.0, 'rms_norm_eps': 1e-06, 'dropout': 0.0, 'init_std': 0.02}
+model_and_token_seed=20261118
+parameter_counts={'token_embedding': 16384000, 'attention': 6291456, 'swiglu': 12976128, 'block_rmsnorm': 6144, 'final_rmsnorm': 512, 'total': 35658240}
+initial_logits_shape=(1, 8, 32000)
+initial_loss=10.653745651245117, log_vocab=10.373491181781864, abs_deviation=0.2802544694632534
+..
+21 passed in 9.02s
+
+HF_HUB_OFFLINE=1 .venv/bin/python -m pytest -q -rs
+........................................................................ [ 58%]
+...................s...............................                      [100%]
+=========================== short test summary info ============================
+SKIPPED [1] tests/test_baselines.py:167: real weights require --run-weights
+122 passed, 1 skipped in 9.92s
+
+git diff --check passed.
