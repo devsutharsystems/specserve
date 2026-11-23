@@ -1,0 +1,42 @@
+draft_model:
+  d_model: 512
+  n_layer: 6
+  n_head: 8
+  hidden_dim: 1408
+  context_length: 1024
+  vocab_size: 32000
+  tokenizer_model_id: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+  rope_base: 10000.0
+  rms_norm_eps: 1.0e-06
+  dropout: 0.0
+  init_std: 0.02
+overfit:
+  model_config: configs/draft_a.yaml
+  dataset:
+    seed: 20261119
+    token_start: 256
+    cycle_length: 128
+    sequences: 100
+    tokens_per_sequence: 256
+  seed: 20261118
+  device: cpu
+  dtype: float32
+  cpu_threads: 4
+  deterministic_algorithms: true
+  batch_size: 1
+  optimizer: AdamW
+  optimizer_kwargs:
+    lr: 0.001
+    betas:
+    - 0.9
+    - 0.95
+    eps: 1.0e-08
+    weight_decay: 0.0
+    foreach: false
+  grad_clip_norm: 1.0
+  scheduler: null
+  grad_scaler: null
+  max_epochs: 3
+  checkpoint_interval_steps: 25
+  initial_loss_tolerance: 0.5
+  loss_threshold: 0.1

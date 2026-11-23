@@ -1,0 +1,168 @@
+base_commit: f6505dd2116166049034991b943a49f9eac7c4c2
+training_source_sha256: c511b3f8fbd49d8d728d32ef8cfd66b0c8fc324011b5ee0ff49b36ca03781d25
+config_sha256: 9f896d6f9098908a0c39b39e8b1f946385341934641661bd12fefa1b6c98aeab
+corpus_sha256: fff1ff0659f8e281e572461f089ae48fc2820032c8c80e546502751c439f6b77
+python: 3.12.16
+platform: macOS-27.2.1-arm64-arm-64bit
+torch: 2.11.0
+numpy: 2.5.4
+pytest: 9.2.0
+pyyaml: 6.0.3
+trainable_parameters: 35658240
+verdict: PASSED
+error: null
+optimizer_steps_completed: 100
+full_corpus_evaluations:
+- step: 0
+  target_count: 25500
+  mean_loss: 10.43630463962929
+- step: 100
+  target_count: 25500
+  mean_loss: 0.007881419810594297
+training_step_losses:
+- 10.383017539978027
+- 9.534049987792969
+- 9.495299339294434
+- 8.739518165588379
+- 7.997771263122559
+- 7.579435348510742
+- 6.978219985961914
+- 6.400568962097168
+- 5.9259467124938965
+- 5.4706010818481445
+- 5.163712978363037
+- 4.8789825439453125
+- 8.545881271362305
+- 4.953304290771484
+- 4.881555080413818
+- 4.835691928863525
+- 4.7617645263671875
+- 4.770600318908691
+- 4.661672115325928
+- 4.419829845428467
+- 5.047154903411865
+- 4.143802642822266
+- 3.949801206588745
+- 3.7778635025024414
+- 3.4528048038482666
+- 3.508141040802002
+- 3.1043171882629395
+- 2.74835205078125
+- 2.4571871757507324
+- 2.283710479736328
+- 2.018871545791626
+- 1.6424566507339478
+- 1.782097578048706
+- 1.6515244245529175
+- 1.0921125411987305
+- 0.8110930919647217
+- 0.5891876816749573
+- 0.39959076046943665
+- 0.5215035676956177
+- 0.5120970606803894
+- 0.3114706575870514
+- 0.19757354259490967
+- 0.21351127326488495
+- 0.10766661167144775
+- 0.2137003242969513
+- 0.06920338422060013
+- 0.05029165372252464
+- 0.06438573449850082
+- 0.04319887235760689
+- 0.020430702716112137
+- 0.01674419827759266
+- 0.042074818164110184
+- 0.022089730948209763
+- 0.031188566237688065
+- 0.01639757864177227
+- 0.028463946655392647
+- 0.041661716997623444
+- 0.023916156962513924
+- 0.019441474229097366
+- 0.009328595362603664
+- 0.007761252112686634
+- 0.03290748968720436
+- 0.048234984278678894
+- 0.007628835737705231
+- 0.014311278238892555
+- 0.018577856943011284
+- 0.005398268345743418
+- 0.008364909328520298
+- 0.004240811336785555
+- 0.021032756194472313
+- 0.01387819554656744
+- 0.005072962958365679
+- 0.005504040513187647
+- 0.019677255302667618
+- 0.0033127255737781525
+- 0.0042975605465471745
+- 0.005703736562281847
+- 0.009815643541514874
+- 0.049425072968006134
+- 0.030775997787714005
+- 0.0070025078020989895
+- 0.009429988451302052
+- 0.006669226568192244
+- 0.00466072978451848
+- 0.003449556650593877
+- 0.02388228103518486
+- 0.021967964246869087
+- 0.003943456802517176
+- 0.01292802020907402
+- 0.00868084467947483
+- 0.004256473388522863
+- 0.02977665700018406
+- 0.0026281862519681454
+- 0.005999264307320118
+- 0.014771657064557076
+- 0.002579523017629981
+- 0.015480314381420612
+- 0.00520151574164629
+- 0.0045101456344127655
+- 0.00833627488464117
+local_validation:
+  preflight:
+    method: Six disposable full-shape train updates and evaluation sequences, followed by a checkpoint write.
+    host_ram_bytes: 8589934592
+    host_cpu_count: 8
+    intra_op_threads: 4
+    peak_process_rss_bytes: 948158464
+    checkpoint_bytes: 427984379
+    estimated_disk_bytes_for_atomic_replacement: 855968758
+    available_tmp_disk_bytes: 40632320000
+    estimated_seconds_first_epoch_including_evaluations: 117.8
+    estimated_seconds_full_three_epoch_budget: 334.2
+  fast_day5:
+    command: PYTHONDONTWRITEBYTECODE=1 HF_HUB_OFFLINE=1 .venv/bin/python -m pytest -q -rs tests/test_overfit.py
+    result: |-
+      ......s                                                                  [100%]
+      =========================== short test summary info ============================
+      SKIPPED [1] tests/test_overfit.py:336: full Draft-A gate is opt-in
+      6 passed, 1 skipped in 9.55s
+  day3_day4:
+    command: PYTHONDONTWRITEBYTECODE=1 HF_HUB_OFFLINE=1 .venv/bin/python -m pytest -q -rs tests/test_draft_model.py tests/test_draft_kv_cache.py
+    result: |-
+      .........................................                                [100%]
+      41 passed in 20.66s
+  full_gate:
+    command: SPECSERVE_RUN_OVERFIT=1 SPECSERVE_OVERFIT_CHECKPOINT=/tmp/specserve-day05.a3Zmun2Z/checkpoint.pt PYTHONDONTWRITEBYTECODE=1 HF_HUB_OFFLINE=1 /usr/bin/time -l .venv/bin/python -m pytest -q -rs -s tests/test_overfit.py -k test_draft_a_overfit_gate
+    pytest_result: 1 passed, 6 deselected in 121.34s
+    wall_seconds: 123.24
+    wrapper_exit_code: 1
+    wrapper_note: macOS time reported a sandbox-denied sysctl kern.clockrate after pytest completed successfully.
+  checkpoint_re_evaluation:
+    method: Reloaded saved weights and scored the same fixed corpus again with no updates.
+    exit_code: 0
+    result: |-
+      Checkpoint re-evaluation: mean_loss=0.007881419810594297, targets=25500, optimizer_steps=100
+      Checkpoint bytes: 427985403
+  default_cpu_suite:
+    command: PYTHONDONTWRITEBYTECODE=1 HF_HUB_OFFLINE=1 .venv/bin/python -m pytest -q -rs
+    result: |-
+      ........................................................................ [ 48%]
+      ...................s.................................................... [ 96%]
+      .....s                                                                   [100%]
+      =========================== short test summary info ============================
+      SKIPPED [1] tests/test_baselines.py:167: real weights require --run-weights
+      SKIPPED [1] tests/test_overfit.py:336: full Draft-A gate is opt-in
+      148 passed, 2 skipped in 21.35s
