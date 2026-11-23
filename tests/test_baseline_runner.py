@@ -635,3 +635,375 @@ def test_environment_requires_pinned_t4(monkeypatch):
     monkeypatch.setattr(runner.torch, "__version__", "2.11.0")
     with pytest.raises(RuntimeError, match="Expected torch"):
         runner.validate_environment()
+
+
+@pytest.fixture
+def fp16_diagnostic_evidence(tmp_path, config_bytes, settings, run_identity, generation_config):
+    from kaggle import diagnose_fp16 as diagnostic
+    from kaggle.baseline_artifacts import json_bytes, write_correctness
+
+    identity = {**run_identity, "git_commit": diagnostic.AUDITED_COMMIT}
+    records = runner.read_frozen(ROOT / "bench/prompts.jsonl", settings)
+    source = tmp_path / "source/experiments"
+    (source / "baseline/audits").mkdir(parents=True)
+    runtime = {"attention_implementation": "sdpa"}
+    session = {
+        "id": "2" * 32, "status": "blocked", "failed_stage": "fp16_audit",
+        "fp16_divergences": {"fp16_untimed": 1, "fp16_measured": 0},
+        "torch.float16": runtime, "torch.float32": runtime,
+    }
+    manifest = {
+        "run_id": "3" * 32, "identity": identity, "sessions": [session],
+        "speed_results_accepted": False, "requires_dev_review": True,
+        "target_runtime": {"torch.float16": runtime, "torch.float32": runtime},
+    }
+    (source / "env.txt").write_bytes(json_bytes(identity))
+    (source / "baseline/run.json").write_bytes(json_bytes(manifest))
+    (source / "baseline/bench.yaml").write_bytes(config_bytes)
+    rows = [
+        runner.check_row("integrity", None, None, status="pass", benchmark_sha256=runner.PROMPTS_SHA256),
+        runner.check_row(
+            "tokenizer_and_generation", None, None, status="pass",
+            revision=runner.TARGET_REVISION, token_counts_checked=len(records),
+            generation_config=generation_config.to_diff_dict(),
+        ),
+    ]
+    subset = first_five_per_category([SimpleNamespace(**record) for record in records])
+    for stage, selected in (("fp32_first_20", [row.id for row in subset]),
+                            ("fp32_full", [row["id"] for row in records])):
+        for method in runner.METHODS:
+            rows.extend(runner.check_row(
+                stage, method, prompt_id, status="pass", reference_length=128, output_length=128,
+            ) for prompt_id in selected)
+
+    def replay(pair, logits):
+        widths = [34] + ([1] * 90 if pair[0] == 367 else [9] + [1] * 89)
+        return {
+            "reproduced": True,
+            "prediction": {
+                "source": "original_shape_replay", "prefix_matches": True, "forward_shape": [1, 1],
+                "cache_length_before_forward": 123, "logit_row": 0,
+                "forward_index": len(widths) - 1, "query_lengths_through_forward": widths,
+                "top_two": {"ids": pair, "logits": logits, "gap": logits[0] - logits[1]},
+                "compared_logits": {"367": 17.28125, "13100": logits[0]},
+            },
+        }
+
+    evidence = {
+        "position": 90, "reference_token_id": 367, "output_token_id": 13100,
+        "reference_stop": {"reason": "budget"}, "output_stop": {"reason": "budget"},
+        "reference_replay": replay([367, 2125], [17.28125, 17.28125]),
+        "output_replay": replay([13100, 367], [17.296875, 17.28125]),
+        "outputs_sha256": "4" * 64,
+    }
+    case_id = digest(json_bytes([identity, "chat_qa-25", "prompt_lookup", evidence]))
+    for record in records:
+        if record["id"] == "chat_qa-25":
+            rows.append(runner.check_row(
+                "fp16_untimed", "prompt_lookup", record["id"], status="fail",
+                **evidence, near_tie_reviewable=False, case_id=case_id,
+            ))
+        else:
+            rows.append(runner.check_row(
+                "fp16_untimed", "prompt_lookup", record["id"], status="pass", output_length=128,
+            ))
+    correctness = source / "baseline/correctness.csv"
+    write_correctness(correctness, rows)
+    (source / f'baseline/audits/{session["id"]}.csv').write_bytes(correctness.read_bytes())
+    return source, identity, records, case_id
+
+
+@pytest.mark.parametrize("source_kind", ["directory", "archive"])
+def test_fp16_diagnostic_validates_and_copies_original_evidence(
+    tmp_path, monkeypatch, fp16_diagnostic_evidence, generation_config, source_kind,
+):
+    import tarfile
+
+    from kaggle import diagnose_fp16 as diagnostic
+
+    source, identity, _, case_id = fp16_diagnostic_evidence
+    archive = tmp_path / "specserve-day2b2-audit.tar.gz"
+    if source_kind == "archive":
+        with tarfile.open(archive, "w:gz") as tar:
+            tar.add(source, arcname="experiments")
+        source.rename(tmp_path / "saved-original")
+
+    args = SimpleNamespace(
+        checkout=ROOT, git_sha=diagnostic.AUDITED_COMMIT,
+        source_experiments=source if source_kind == "directory" else None,
+        source_archive=archive if source_kind == "archive" else None,
+    )
+    script = tmp_path / "diagnose_fp16.py"
+    script.write_bytes(Path(diagnostic.__file__).read_bytes())
+    output = tmp_path / "diagnostic"
+    monkeypatch.setattr(runner, "verify_checkout", lambda *_args: diagnostic.AUDITED_COMMIT)
+    monkeypatch.setattr(runner, "validate_environment", lambda: identity["environment"])
+    monkeypatch.setattr(runner, "preflight_tokenizer_and_generation",
+                        lambda: (SimpleNamespace(eos_token_id=2), generation_config))
+    monkeypatch.setattr(runner, "tokenize_prompts", lambda *_args: [prompt("chat_qa-25")])
+    monkeypatch.setattr(torch.cuda, "manual_seed_all", lambda _seed: None)
+
+    def run_probe(_output, _phase, item, _settings, _eos, case, _make_target):
+        assert item.id == "chat_qa-25" and case["case_id"] == case_id
+        return "cpu_fixture"
+
+    monkeypatch.setattr(diagnostic, "diagnose", run_probe)
+    diagnostic.persist_run(output, script, lambda phase: diagnostic.execute(args, script, output, phase))
+    provenance = json.loads((output / "provenance.json").read_bytes())
+    assert provenance["case_id"] == case_id
+    assert provenance["script_sha256"] == digest(script.read_bytes())
+    assert provenance["source_archive_sha256"] == (
+        digest(archive.read_bytes()) if source_kind == "archive" else None
+    )
+    original = source if source_kind == "directory" else tmp_path / "saved-original"
+    for name, checksum in provenance["source_file_sha256"].items():
+        data = (output / "original/experiments" / name).read_bytes()
+        assert data == (original / name).read_bytes()
+        assert digest(data) == checksum
+
+
+@pytest.mark.parametrize(("defect", "match"), [
+    ("missing_yaml", "Missing or empty original evidence"),
+    ("stale_audit", "inconsistent archived audit"),
+    ("bad_env", "environment and run identity disagree"),
+    ("bad_yaml", "Original YAML differs"),
+    ("changed_case", "Inconsistent case ID"),
+    ("traversal", "Invalid or duplicate archive path"),
+    ("symlink", "Non-regular archive member"),
+    ("duplicate", "Invalid or duplicate archive path"),
+    ("truncated", "end-of-stream marker"),
+])
+def test_fp16_diagnostic_rejects_invalid_archive(
+    tmp_path, fp16_diagnostic_evidence, config_bytes, defect, match,
+):
+    import tarfile
+
+    from kaggle import diagnose_fp16 as diagnostic
+
+    source, identity, records, _ = fp16_diagnostic_evidence
+    audit = next((source / "baseline/audits").iterdir())
+    if defect == "missing_yaml":
+        (source / "baseline/bench.yaml").unlink()
+    if defect == "stale_audit":
+        audit.write_bytes(b"outdated")
+    if defect == "bad_env":
+        (source / "env.txt").write_text("{}")
+    if defect == "bad_yaml":
+        (source / "baseline/bench.yaml").write_bytes(config_bytes + b"\n")
+    if defect == "changed_case":
+        corrupted = audit.read_bytes().replace(b"17.296875", b"17.312500")
+        (source / "baseline/correctness.csv").write_bytes(corrupted)
+        audit.write_bytes(corrupted)
+
+    archive = tmp_path / "specserve-day2b2-audit.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        tar.add(source, arcname="experiments")
+        if defect == "traversal":
+            tar.addfile(tarfile.TarInfo("experiments/../env.txt"))
+        if defect == "duplicate":
+            tar.addfile(tarfile.TarInfo("experiments/env.txt"))
+        if defect == "symlink":
+            member = tarfile.TarInfo("experiments/extra")
+            member.type = tarfile.SYMTYPE
+            member.linkname = "env.txt"
+            tar.addfile(member)
+    if defect == "truncated":
+        archive.write_bytes(archive.read_bytes()[:-8])
+
+    with pytest.raises((RuntimeError, EOFError), match=match):
+        files, manifest, _ = diagnostic.load_source(None, archive)
+        diagnostic.validate_audit(files, manifest, identity, config_bytes, records)
+
+
+@pytest.mark.parametrize("backend", ["sdpa", "eager"])
+@torch.inference_mode()
+def test_fp16_diagnostic_fixed_prefix_and_suffix_controls(backend):
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    from kaggle import diagnose_fp16 as diagnostic
+
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(7)
+        target = LlamaForCausalLM(LlamaConfig(
+            vocab_size=24, hidden_size=16, intermediate_size=32, num_hidden_layers=2,
+            num_attention_heads=4, num_key_value_heads=2, attn_implementation=backend,
+        )).eval()
+
+    def call(tokens, before, crop=0):
+        return {
+            "input_ids": tokens, "cache_before": before, "cache_after_forward": before + len(tokens),
+            "crop": crop, "cache_after_crop": before + len(tokens) - crop,
+            "logits_to_keep": 1 if before == 0 else 0,
+        }
+
+    prefix = [1, 3, 6, 7, 8]
+    greedy = [call([1, 3], 0)] + [call([token], i) for i, token in enumerate(prefix[2:], start=2)]
+    lookup = [call([1, 3], 0), call([6, 7, 15, 16], 2, 2), call([8], 4)]
+    assert diagnostic.history_matches(greedy, prefix)
+    assert diagnostic.history_matches(lookup, prefix)
+    assert not diagnostic.history_matches(lookup, [1, 3, 6, 15, 8])
+    greedy_row, _, greedy_checks = diagnostic.fixed_history(target, greedy, "cpu")
+    lookup_row, incoming, lookup_checks = diagnostic.fixed_history(target, lookup, "cpu", inspect_call=1)
+    reference = target(input_ids=torch.tensor([prefix]), use_cache=False).logits[0, -1]
+    assert all(greedy_checks + lookup_checks)
+    torch.testing.assert_close(greedy_row, reference)
+    torch.testing.assert_close(lookup_row, reference)
+
+    left = diagnostic.clone_cache(target, incoming, "cpu")
+    right = diagnostic.clone_cache(target, incoming, "cpu")
+    left.layers[0].keys.zero_()
+    assert torch.equal(right.layers[0].keys, incoming[0][0])
+    assert not torch.equal(left.layers[0].keys, right.layers[0].keys)
+    assert torch.equal(*diagnostic.identical_cache_control(target, incoming, 6, "cpu"))
+
+    suffix, tensors = diagnostic.suffix_control(target, incoming, lookup[1], "cpu")
+    assert suffix["structural_checks"] and suffix["repeat_exact"]
+    assert not suffix["suffix_influence"]
+    assert suffix["perturbed_input_ids"][:2] == [6, 7]
+    assert suffix["perturbed_input_ids"][2:] != [15, 16]
+    assert suffix["geometry"][0]["positions"] == [[2, 3, 4, 5]]
+    mask = tensors[0][2][0]
+    allowed = mask if mask.dtype == torch.bool else mask == 0
+    assert torch.equal(allowed[0, 0], torch.arange(6) <= torch.arange(2, 6)[:, None])
+    assert not diagnostic.mask_evidence(None, True, 4, 6, 2)["expected_causal_pattern"]
+
+
+def test_fp16_diagnostic_persists_partial_evidence_on_failure(tmp_path):
+    from kaggle import diagnose_fp16 as diagnostic
+
+    output = tmp_path / "output"
+    script = tmp_path / "diagnose_fp16.py"
+    script.write_bytes(b"diagnostic fixture")
+    evidence = torch.tensor([[1, 2]])
+
+    def fail(phase):
+        phase("fixed_history_fp16")
+        diagnostic.save_tensors(output / "completed.pt", evidence)
+        phase("fixed_history_fp32")
+        raise RuntimeError("controlled failure")
+
+    with pytest.raises(RuntimeError, match="controlled failure"):
+        diagnostic.persist_run(output, script, fail)
+    assert torch.equal(torch.load(output / "completed.pt", weights_only=True), evidence)
+    state = json.loads((output / "diagnostic.json").read_bytes())
+    assert state["phase"] == "fixed_history_fp32" and state["status"] == "failed"
+    assert state["error_type"] == "RuntimeError" and state["error"] == "controlled failure"
+    assert state["script_sha256"] == digest(script.read_bytes())
+    assert not list(output.glob(".pending-*"))
+
+
+@torch.inference_mode()
+def test_fp16_diagnostic_observes_native_replay(tmp_path, settings, monkeypatch):
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    from kaggle import diagnose_fp16 as diagnostic
+    from kaggle.baseline_audit import ReplayTarget
+
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(7)
+        target = LlamaForCausalLM(LlamaConfig(
+            vocab_size=24, hidden_size=16, intermediate_size=32, num_hidden_layers=1,
+            num_attention_heads=4, num_key_value_heads=2, attn_implementation="sdpa",
+        )).eval()
+    item = prompt(budget=4, tokens=[1, 4, 5])
+    decode = runner.make_decoder(target, None, settings)
+    monkeypatch.setattr(diagnostic, "POSITION", 2)
+    monkeypatch.setattr(diagnostic, "WINNERS", (5, 7))
+    for method in runner.METHODS:
+        original = decode(method, item)
+        audit_observer = ReplayTarget(target, original, 2, item.token_ids, (5, 7))
+        assert decode(method, item, target=audit_observer) == original
+
+        calls, captured = diagnostic.native_trace(
+            target, decode, method, item, original, {"prediction": audit_observer.evidence}, tmp_path,
+        )
+        assert diagnostic.history_matches(calls, item.token_ids + original.token_ids[:2])
+        assert calls[-1]["cache_before"] == 4
+        assert calls[-1]["positions"] == [[4]]
+        assert calls[-1]["masks_match"]
+        assert captured["logits"].argmax().item() == original.token_ids[2]
+        on_disk = torch.load(tmp_path / f"{method}-retained-kv.pt", weights_only=True)
+        assert diagnostic.cache_matches(on_disk, 4)
+        prediction = torch.load(tmp_path / f"{method}-prediction.pt", weights_only=True)
+        assert torch.equal(prediction["logits"], captured["logits"])
+        assert prediction["masks"] == [None]
+
+
+@pytest.mark.parametrize(("lookup_tail", "outcome"), [
+    (1e-6, "numerical_drift_supported_dev_review"),
+    (-0.25, "unresolved"),
+], ids=["rounding-only", "same-winner-material-difference"])
+def test_fp16_diagnostic_requires_full_fp32_logit_agreement(
+    tmp_path, settings, monkeypatch, lookup_tail, outcome,
+):
+    from kaggle import diagnose_fp16 as diagnostic
+    from kaggle.baseline_artifacts import json_bytes
+
+    item = prompt(tokens=[1, 3])
+    generated = [[4, 5, 0], [4, 5, 1]]
+    case = {
+        "outputs_sha256": digest(json_bytes(generated)),
+        "reference_replay": {}, "output_replay": {},
+    }
+    methods = list(runner.METHODS)
+    monkeypatch.setattr(diagnostic, "POSITION", 2)
+    monkeypatch.setattr(diagnostic, "WINNERS", (0, 1))
+    monkeypatch.setattr(diagnostic, "CACHE_LENGTH", 3)
+    monkeypatch.setattr(runner, "make_decoder", lambda *_args: (
+        lambda method, _prompt: DecodeResult(generated[methods.index(method)], [], False)
+    ))
+
+    def call(tokens, before, crop=0):
+        end = before + len(tokens)
+        return {
+            "input_ids": tokens, "cache_before": before, "cache_after_forward": end,
+            "cache_after_crop": end - crop, "crop": crop, "positions_match": True, "masks_match": True,
+        }
+
+    traces = [
+        [call([1, 3], 0), call([4], 2), call([5], 3)],
+        [call([1, 3], 0), call([4, 6], 2, crop=1), call([5], 3)],
+    ]
+    fp16_rows = torch.tensor([[2.0, 0.0], [0.0, 2.0]], dtype=torch.float16)
+    fp32_rows = torch.tensor([[2.0, 0.0], [2.0, lookup_tail], [2.0, 0.0]], dtype=torch.float32)
+
+    def native_trace(_target, _decode, method, *_args):
+        index = methods.index(method)
+        keys = torch.tensor([[[[0.0], [0.0], [index]]]], dtype=torch.float16)
+        return traces[index], {"kv": [(keys, keys)], "logits": fp16_rows[index]}
+
+    class Target:
+        model = SimpleNamespace(layers=[object()])
+
+        def __init__(self, dtype):
+            self.dtype = dtype
+
+        def __call__(self, **_kwargs):
+            return SimpleNamespace(logits=fp32_rows[2].reshape(1, 1, -1))
+
+    def fixed_history(target, calls, _device, *, inspect_call=None):
+        rows = fp16_rows if target.dtype == torch.float16 else fp32_rows
+        return rows[int(bool(calls[1]["crop"]))], None, [True]
+
+    monkeypatch.setattr(diagnostic, "native_trace", native_trace)
+    monkeypatch.setattr(diagnostic, "fixed_history", fixed_history)
+    monkeypatch.setattr(diagnostic, "identical_cache_control", lambda _target, kv, *_args: [
+        fp16_rows[int(kv[0][0].flatten()[-1])],
+    ] * 2)
+    monkeypatch.setattr(diagnostic, "suffix_control", lambda *_args: (
+        {"repeat_exact": True, "structural_checks": True, "suffix_influence": False}, [],
+    ))
+
+    assert diagnostic.diagnose(tmp_path, lambda _phase: None, item, settings, None, case, Target) == outcome
+    saved = torch.load(tmp_path / "fp32-fixed-history-logits.pt", weights_only=True)
+    assert torch.equal(torch.stack(saved), fp32_rows)
+    evidence = json.loads((tmp_path / "fp32-fixed-history.json").read_bytes())
+    assert [row["winner"] for row in evidence["logits"]] == [0, 0, 0]
+    assert evidence["logit_deltas_from_greedy"][0]["max_abs"] == abs(fp32_rows[1, 1].item())
+    comparison = evidence["full_logit_comparison"]
+    assert comparison["rtol"] == 1.3e-6 and comparison["atol"] == 1e-5
+    close = outcome == "numerical_drift_supported_dev_review"
+    assert comparison["pairwise_close"] == {
+        "lookup_vs_greedy": close, "greedy_vs_uncached": True, "lookup_vs_uncached": close,
+    }
+    assert comparison["lookup_delta_from_uncached"] == evidence["logit_deltas_from_greedy"][0]
